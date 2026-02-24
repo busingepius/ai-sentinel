@@ -1,0 +1,144 @@
+package io.aisentinel.autoconfigure.config;
+
+import io.aisentinel.core.SentinelPipeline;
+import io.aisentinel.core.enforcement.CompositeEnforcementHandler;
+import io.aisentinel.core.enforcement.EnforcementHandler;
+import io.aisentinel.core.enforcement.MonitorOnlyEnforcementHandler;
+import io.aisentinel.core.feature.DefaultFeatureExtractor;
+import io.aisentinel.core.feature.FeatureExtractor;
+import io.aisentinel.core.policy.PolicyEngine;
+import io.aisentinel.core.policy.ThresholdPolicyEngine;
+import io.aisentinel.core.scoring.CompositeScorer;
+import io.aisentinel.core.scoring.IsolationForestScorer;
+import io.aisentinel.core.scoring.StatisticalScorer;
+import io.aisentinel.core.store.BaselineStore;
+import io.aisentinel.core.telemetry.DefaultTelemetryEmitter;
+import io.aisentinel.core.telemetry.TelemetryConfig;
+import io.aisentinel.core.telemetry.TelemetryEmitter;
+import io.aisentinel.autoconfigure.web.SentinelFilter;
+import io.micrometer.core.instrument.MeterRegistry;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.boot.autoconfigure.AutoConfiguration;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.annotation.Bean;
+import org.springframework.beans.factory.ObjectProvider;
+
+@Slf4j
+@AutoConfiguration
+@ConditionalOnWebApplication
+@ConditionalOnProperty(name = "ai.sentinel.enabled", havingValue = "true", matchIfMissing = true)
+@EnableConfigurationProperties(SentinelProperties.class)
+public class SentinelAutoConfiguration {
+
+    @Bean
+    @ConditionalOnMissingBean
+    public BaselineStore baselineStore(SentinelProperties props) {
+        log.debug("Creating BaselineStore with ttl={}, maxKeys={}", props.getBaselineTtl(), props.getBaselineMaxKeys());
+        return new BaselineStore(props.getBaselineTtl(), props.getBaselineMaxKeys());
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public FeatureExtractor featureExtractor(BaselineStore store) {
+        return new DefaultFeatureExtractor(store);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public StatisticalScorer statisticalScorer() {
+        return new StatisticalScorer();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public IsolationForestScorer isolationForestScorer() {
+        return new IsolationForestScorer();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public CompositeScorer compositeScorer(StatisticalScorer statisticalScorer,
+                                           IsolationForestScorer isolationForestScorer,
+                                           SentinelProperties props) {
+        var composite = new CompositeScorer();
+        composite.addScorer(statisticalScorer, 1.0);
+        if (props.getIsolationForest().isEnabled()) {
+            log.debug("Adding IsolationForestScorer with weight 0.5");
+            composite.addScorer(isolationForestScorer, 0.5);
+        }
+        return composite;
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public PolicyEngine policyEngine() {
+        return new ThresholdPolicyEngine();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public TelemetryEmitter telemetryEmitter(ObjectProvider<MeterRegistry> registryProvider,
+                                             SentinelProperties props) {
+        var t = props.getTelemetry();
+        var verbosity = switch (t.getLogVerbosity().toUpperCase()) {
+            case "FULL" -> TelemetryConfig.LogVerbosity.FULL;
+            case "ANOMALY_ONLY" -> TelemetryConfig.LogVerbosity.ANOMALY_ONLY;
+            case "SAMPLED" -> TelemetryConfig.LogVerbosity.SAMPLED;
+            case "NONE" -> TelemetryConfig.LogVerbosity.NONE;
+            default -> TelemetryConfig.LogVerbosity.ANOMALY_ONLY;
+        };
+        var telemetryConfig = new TelemetryConfig(verbosity, t.getLogScoreThreshold(), t.getLogSampleRate());
+        log.debug("Creating TelemetryEmitter with verbosity={}", verbosity);
+        return new DefaultTelemetryEmitter(registryProvider.getIfAvailable(), telemetryConfig);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean(name = "enforcementHandlerImpl")
+    public CompositeEnforcementHandler enforcementHandlerImpl(TelemetryEmitter telemetry, SentinelProperties props) {
+        return new CompositeEnforcementHandler(
+            props.getBlockStatusCode(),
+            props.getQuarantineDurationMs(),
+            props.getThrottleRequestsPerSecond(),
+            telemetry
+        );
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public EnforcementHandler enforcementHandler(CompositeEnforcementHandler enforcementHandlerImpl,
+                                                 TelemetryEmitter telemetry,
+                                                 SentinelProperties props) {
+        if (props.getMode() == SentinelProperties.Mode.MONITOR) {
+            log.info("Sentinel running in MONITOR mode - no requests will be blocked");
+            return new MonitorOnlyEnforcementHandler(enforcementHandlerImpl, telemetry);
+        }
+        return enforcementHandlerImpl;
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public SentinelPipeline sentinelPipeline(FeatureExtractor featureExtractor,
+                                             CompositeScorer compositeScorer,
+                                             PolicyEngine policyEngine,
+                                             EnforcementHandler enforcementHandler,
+                                             TelemetryEmitter telemetry,
+                                             SentinelProperties props) {
+        log.info("Sentinel pipeline configured (mode={})", props.getMode());
+        return new SentinelPipeline(
+            featureExtractor,
+            compositeScorer,
+            policyEngine,
+            enforcementHandler,
+            telemetry
+        );
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public SentinelFilter sentinelFilter(SentinelPipeline pipeline, SentinelProperties props) {
+        return new SentinelFilter(pipeline, props);
+    }
+}

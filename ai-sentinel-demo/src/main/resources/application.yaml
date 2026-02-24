@@ -1,0 +1,26 @@
+server:
+  port: 8080
+
+# ai-sentinel
+ai:
+  sentinel:
+    enabled: true
+    mode: ENFORCE
+    exclude-paths: /actuator/**,/health,/health/**,/favicon.ico
+    telemetry:
+      # Log verbosity: FULL | ANOMALY_ONLY | SAMPLED | NONE (default: ANOMALY_ONLY for less noise)
+      log-verbosity: ANOMALY_ONLY
+      log-score-threshold: 0.4
+      log-sample-rate: 100
+
+# Prometheus metrics
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,sentinel
+  endpoint:
+    sentinel:
+      enabled: true
+    health:
+      show-details: when-authorized

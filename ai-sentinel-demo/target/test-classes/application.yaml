@@ -1,0 +1,10 @@
+ai:
+  sentinel:
+    enabled: true
+    mode: MONITOR
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,sentinel
